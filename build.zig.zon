@@ -1,0 +1,14 @@
+.{
+    .name = .cage,
+    .version = "0.1.0",
+    .fingerprint = 0x56a64e51339a0d6e,
+    .minimum_zig_version = "0.17.0",
+    .dependencies = .{},
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+        "provisioning",
+        "README.md",
+    },
+}
