@@ -1,8 +1,9 @@
 const std = @import("std");
 const Io = std.Io;
+const cli = @import("cli.zig");
+const commands = @import("commands.zig");
 
-/// Cage version reported by `cage version`.
-pub const version = "0.1.0";
+pub const version = cli.version;
 
 pub fn main(init: std.process.Init) !void {
     const io = init.io;
@@ -11,46 +12,32 @@ pub fn main(init: std.process.Init) !void {
 
     var stdout_buffer: [4096]u8 = undefined;
     var stdout_writer: Io.File.Writer = .init(.stdout(), io, &stdout_buffer);
-    const out = &stdout_writer.interface;
+    var stderr_buffer: [4096]u8 = undefined;
+    var stderr_writer: Io.File.Writer = .init(.stderr(), io, &stderr_buffer);
 
-    const rest = args[1..];
-    if (rest.len == 0) {
-        try printHelp(out);
-    } else if (std.mem.eql(u8, rest[0], "version")) {
-        try out.print("cage {s}\n", .{version});
-    } else if (std.mem.eql(u8, rest[0], "help") or
-        std.mem.eql(u8, rest[0], "--help") or
-        std.mem.eql(u8, rest[0], "-h"))
-    {
-        try printHelp(out);
-    } else {
-        try out.print("cage: unknown command '{s}'\n\n", .{rest[0]});
-        try printHelp(out);
-    }
+    const ctx = commands.Context{
+        .alloc = arena,
+        .io = io,
+        .out = &stdout_writer.interface,
+        .err = &stderr_writer.interface,
+        .environ = init.environ_map,
+    };
 
-    try out.flush();
+    const code = cli.run(ctx, args) catch |err| {
+        try ctx.err.print("cage: {s}\n", .{@errorName(err)});
+        try ctx.err.flush();
+        std.process.exit(1);
+    };
+
+    try ctx.out.flush();
+    try ctx.err.flush();
+
+    if (code != 0) std.process.exit(code);
 }
 
-fn printHelp(w: *Io.Writer) !void {
-    try w.writeAll(
-        \\cage - manage Incus VM sandboxes for agentic development
-        \\
-        \\Usage:
-        \\  cage <command> [options]
-        \\
-        \\Commands:
-        \\  create <name>   Create a sandbox
-        \\  list            List sandboxes
-        \\  shell <name>    Open a shell in a sandbox
-        \\  start <name>    Start a sandbox
-        \\  stop <name>     Stop a sandbox
-        \\  remove <name>   Remove a sandbox
-        \\  version         Print version
-        \\  help            Print this help
-        \\
-    );
-}
-
-test "version is not empty" {
-    try std.testing.expect(version.len > 0);
+test {
+    _ = cli;
+    _ = commands;
+    _ = @import("config.zig");
+    _ = @import("incus.zig");
 }

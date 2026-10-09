@@ -112,7 +112,7 @@ pub fn parse(alloc: Allocator, text: []const u8) !Config {
 
 /// Resolves the config file path, honouring `$CAGE_CONFIG` then
 /// `$XDG_CONFIG_HOME/cage/config.json`, falling back to `~/.config/cage/config.json`.
-pub fn resolvePath(alloc: Allocator, environ: *const std.Environ.Map) !?[]const u8 {
+pub fn resolvePath(alloc: Allocator, environ: *const std.process.Environ.Map) !?[]const u8 {
     if (environ.get("CAGE_CONFIG")) |p| {
         if (p.len > 0) return try alloc.dupe(u8, p);
     }
