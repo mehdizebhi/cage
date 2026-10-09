@@ -24,12 +24,54 @@ pub const CommandResult = struct {
     }
 };
 
-/// A sandbox as reported by `incus list`.
+/// A sandbox as reported by `incus list`, flattened to the fields Cage shows.
 pub const Instance = struct {
     name: []const u8,
     status: []const u8 = "",
     type: []const u8 = "",
+    ipv4: ?[]const u8 = null,
 };
+
+/// Raw shape of one entry from `incus list --format json`. Only the fields we
+/// need are declared; unknown fields are ignored by the parser.
+const RawInstance = struct {
+    name: []const u8,
+    status: []const u8 = "",
+    type: []const u8 = "",
+    state: ?std.json.Value = null,
+};
+
+/// Extracts the first global IPv4 address from an instance's `state.network`.
+fn pickIPv4(state: ?std.json.Value) ?[]const u8 {
+    const s = state orelse return null;
+    if (s != .object) return null;
+
+    const network = s.object.get("network") orelse return null;
+    if (network != .object) return null;
+
+    var it = network.object.iterator();
+    while (it.next()) |entry| {
+        const iface = entry.value_ptr.*;
+        if (iface != .object) continue;
+
+        const addresses = iface.object.get("addresses") orelse continue;
+        if (addresses != .array) continue;
+
+        for (addresses.array.items) |addr| {
+            if (addr != .object) continue;
+
+            const family = addr.object.get("family") orelse continue;
+            const scope = addr.object.get("scope") orelse continue;
+            if (family != .string or scope != .string) continue;
+            if (!std.mem.eql(u8, family.string, "inet")) continue;
+            if (!std.mem.eql(u8, scope.string, "global")) continue;
+
+            const value = addr.object.get("address") orelse continue;
+            if (value == .string) return value.string;
+        }
+    }
+    return null;
+}
 
 fn buildArgv(alloc: Allocator, args: []const []const u8) !std.ArrayList([]const u8) {
     var argv: std.ArrayList([]const u8) = .empty;
@@ -180,7 +222,7 @@ pub fn list(alloc: Allocator, io: Io) ![]Instance {
     const stdout = try runOk(alloc, io, &.{ "list", "--project", project, "--format", "json" });
     defer alloc.free(stdout);
 
-    const parsed = try std.json.parseFromSliceLeaky([]Instance, alloc, stdout, .{
+    const parsed = try std.json.parseFromSliceLeaky([]RawInstance, alloc, stdout, .{
         .ignore_unknown_fields = true,
     });
     const out = try alloc.alloc(Instance, parsed.len);
@@ -189,6 +231,7 @@ pub fn list(alloc: Allocator, io: Io) ![]Instance {
             .name = try alloc.dupe(u8, inst.name),
             .status = try alloc.dupe(u8, inst.status),
             .type = try alloc.dupe(u8, inst.type),
+            .ipv4 = if (pickIPv4(inst.state)) |ip| try alloc.dupe(u8, ip) else null,
         };
     }
     return out;
@@ -357,13 +400,25 @@ test "formatMemory" {
     }
 }
 
-test "parse list json" {
+test "parse list json and pick ipv4" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
-    const parsed = try std.json.parseFromSliceLeaky([]Instance, arena.allocator(),
-        \\[{"name":"my-agent","status":"Running","type":"virtual-machine"},{"name":"idle","status":"Stopped","type":"virtual-machine"}]
+    const parsed = try std.json.parseFromSliceLeaky([]RawInstance, arena.allocator(),
+        \\[
+        \\  {"name":"my-agent","status":"Running","type":"virtual-machine",
+        \\   "state":{"network":{"enp5s0":{"addresses":[
+        \\     {"family":"inet","address":"10.227.127.196","scope":"global"},
+        \\     {"family":"inet6","address":"fd42::1","scope":"global"},
+        \\     {"family":"inet","address":"127.0.0.1","scope":"local"}]}}}},
+        \\  {"name":"idle","status":"Stopped","type":"virtual-machine","state":{"network":{}}}
+        \\]
     , .{ .ignore_unknown_fields = true });
     try std.testing.expectEqual(@as(usize, 2), parsed.len);
     try std.testing.expectEqualStrings("my-agent", parsed[0].name);
     try std.testing.expectEqualStrings("Stopped", parsed[1].status);
+
+    const ip = pickIPv4(parsed[0].state).?;
+    try std.testing.expectEqualStrings("10.227.127.196", ip);
+    try std.testing.expect(pickIPv4(parsed[1].state) == null);
+    try std.testing.expect(pickIPv4(null) == null);
 }

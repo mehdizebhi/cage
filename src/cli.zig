@@ -4,7 +4,7 @@ const std = @import("std");
 const Io = std.Io;
 const commands = @import("commands.zig");
 
-pub const version = "0.1.1";
+pub const version = "0.2.0";
 
 pub fn run(ctx: commands.Context, args: []const []const u8) !u8 {
     if (args.len < 2) {

@@ -88,9 +88,14 @@ pub fn list(ctx: Context) !void {
         return;
     }
 
-    try ctx.out.print("{s:<20} {s:<12} {s}\n", .{ "NAME", "STATUS", "TYPE" });
+    try ctx.out.print("{s:<20} {s:<12} {s:<18} {s}\n", .{ "NAME", "STATUS", "IPV4", "TYPE" });
     for (instances) |inst| {
-        try ctx.out.print("{s:<20} {s:<12} {s}\n", .{ inst.name, inst.status, inst.type });
+        try ctx.out.print("{s:<20} {s:<12} {s:<18} {s}\n", .{
+            inst.name,
+            inst.status,
+            inst.ipv4 orelse "-",
+            inst.type,
+        });
     }
 }
 
