@@ -43,44 +43,37 @@ apt_run install -y -qq --no-install-recommends \
   vim-tiny \
   xz-utils
 
-# OpenCode: install the release binary from GitHub. This is a stable, versioned
-# source that does not depend on the (sometimes unreachable) opencode.ai
-# installer endpoint. The binary is placed in /usr/local/bin so it is on PATH
-# for every user and every login shell.
+# OpenCode v2: use the official installer (which resolves the latest v2 release
+# from the npm registry), then place the binary on the system PATH so it works
+# for every shell and every `incus exec` invocation, not just interactive logins.
 log "Installing OpenCode"
 install_opencode() {
   command -v opencode >/dev/null 2>&1 && return 0
 
-  case "$(uname -m)" in
-    x86_64 | amd64) asset="opencode-linux-x64.tar.gz" ;;
-    aarch64 | arm64) asset="opencode-linux-arm64.tar.gz" ;;
-    *)
-      log "OpenCode: unsupported architecture '$(uname -m)'"
-      return 1
-      ;;
-  esac
-
-  repo="${OPENCODE_REPO:-anomalyco/opencode}"
-  url="https://github.com/${repo}/releases/latest/download/${asset}"
-  tmp="$(mktemp -d)"
-
-  if curl -fsSL --retry 3 --max-time 300 "$url" -o "$tmp/opencode.tar.gz" &&
-    tar -xzf "$tmp/opencode.tar.gz" -C "$tmp" &&
-    [ -f "$tmp/opencode" ]; then
-    install -m 0755 "$tmp/opencode" /usr/local/bin/opencode
-    rm -rf "$tmp"
-    return 0
+  tmp_installer="$(mktemp)"
+  if ! curl -fsSL --retry 3 --connect-timeout 15 --max-time 180 \
+    https://opencode.ai/v2/install -o "$tmp_installer"; then
+    rm -f "$tmp_installer"
+    log "OpenCode: could not fetch the installer"
+    return 1
   fi
 
-  rm -rf "$tmp"
+  if ! bash "$tmp_installer" --no-modify-path >/dev/null 2>&1; then
+    rm -f "$tmp_installer"
+    log "OpenCode: installer failed"
+    return 1
+  fi
+  rm -f "$tmp_installer"
+
+  if [ -x "$HOME/.opencode/bin/opencode" ]; then
+    install -m 0755 "$HOME/.opencode/bin/opencode" /usr/local/bin/opencode
+    return 0
+  fi
   return 1
 }
 
 if install_opencode; then
-  log "OpenCode installed ($(opencode --version 2>/dev/null || echo unknown))"
-elif command -v npm >/dev/null 2>&1; then
-  log "Falling back to npm for OpenCode"
-  npm install -g opencode-ai || log "OpenCode install skipped"
+  log "OpenCode installed ($(/usr/local/bin/opencode --version 2>/dev/null || echo unknown))"
 else
   log "OpenCode install skipped"
 fi

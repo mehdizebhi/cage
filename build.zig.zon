@@ -1,6 +1,6 @@
 .{
     .name = .cage,
-    .version = "0.2.0",
+    .version = "0.2.1",
     .fingerprint = 0x56a64e51339a0d6e,
     .minimum_zig_version = "0.17.0",
     .dependencies = .{},
