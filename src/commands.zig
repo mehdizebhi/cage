@@ -60,9 +60,21 @@ pub fn create(ctx: Context, opts: CreateOptions) !void {
 
     try incus.launch(ctx.alloc, ctx.io, opts.name, image, cfg.cpu, cfg.memory_bytes);
 
+    incus.waitForAgent(ctx.alloc, ctx.io, opts.name, 120_000) catch |err| {
+        try ctx.err.print("cage: warning: VM agent not ready ({s})\n", .{@errorName(err)});
+    };
+
     provision(ctx, opts.name, cfg) catch |err| {
         try ctx.err.print("cage: warning: provisioning failed ({s})\n", .{@errorName(err)});
     };
+
+    if (ctx.environ.get("GITHUB_TOKEN")) |token| {
+        if (token.len > 0) {
+            configureGithub(ctx, opts.name, token) catch |err| {
+                try ctx.err.print("cage: warning: GitHub auth failed ({s})\n", .{@errorName(err)});
+            };
+        }
+    }
 
     try ctx.out.print("Sandbox '{s}' is ready. Open it with `cage shell {s}`.\n", .{ opts.name, opts.name });
 }
@@ -138,4 +150,30 @@ fn locateBootstrap(ctx: Context) !?[]const u8 {
     const default = "provisioning/bootstrap.sh";
     std.Io.Dir.cwd().access(ctx.io, default, .{}) catch return null;
     return default;
+}
+
+/// Configures `gh` inside the sandbox using a GitHub token. The token is fed
+/// on stdin and never appears in argv, shell history, or `ps` output.
+fn configureGithub(ctx: Context, name: []const u8, token: []const u8) !void {
+    const payload = try std.fmt.allocPrint(ctx.alloc, "{s}\n", .{token});
+
+    const login = try incus.execInput(
+        ctx.alloc,
+        ctx.io,
+        name,
+        &.{ "gh", "auth", "login", "--with-token" },
+        payload,
+    );
+    if (!login.success()) return error.GithubAuthFailed;
+
+    const setup = try incus.execInput(
+        ctx.alloc,
+        ctx.io,
+        name,
+        &.{ "gh", "auth", "setup-git" },
+        "",
+    );
+    if (!setup.success()) return error.GithubSetupFailed;
+
+    try ctx.out.writeAll("Configured GitHub authentication.\n");
 }

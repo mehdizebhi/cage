@@ -51,14 +51,41 @@ pub fn run(alloc: Allocator, io: Io, args: []const []const u8) !CommandResult {
 /// Runs `incus <args...>`, requiring a zero exit code, and returns stdout.
 /// Stderr is released and discarded on success.
 pub fn runOk(alloc: Allocator, io: Io, args: []const []const u8) ![]u8 {
+    return runOkImpl(alloc, io, args, true);
+}
+
+/// Like `runOk` but does not log stderr on failure. Use for expected failures.
+pub fn runOkQuiet(alloc: Allocator, io: Io, args: []const []const u8) ![]u8 {
+    return runOkImpl(alloc, io, args, false);
+}
+
+fn runOkImpl(alloc: Allocator, io: Io, args: []const []const u8, log_errors: bool) ![]u8 {
     const res = try run(alloc, io, args);
     if (!res.term.success()) {
+        if (log_errors) {
+            std.log.err("incus {s} failed: {s}", .{ args[0], std.mem.trimEnd(u8, res.stderr, "\r\n") });
+        }
         alloc.free(res.stdout);
         alloc.free(res.stderr);
         return error.IncusFailed;
     }
     alloc.free(res.stderr);
     return res.stdout;
+}
+
+/// Polls `incus exec` until the VM agent inside the sandbox responds.
+pub fn waitForAgent(alloc: Allocator, io: Io, name: []const u8, timeout_ms: u64) !void {
+    const interval_ms: u64 = 2000;
+    const attempts = @max(@as(u64, 1), timeout_ms / interval_ms);
+    var i: u64 = 0;
+    while (i < attempts) : (i += 1) {
+        const res = try run(alloc, io, &.{ "exec", "--project", project, name, "--", "true" });
+        const ready = res.term.success();
+        res.deinit(alloc);
+        if (ready) return;
+        std.Io.sleep(io, std.Io.Duration.fromMilliseconds(@intCast(interval_ms)), .awake) catch {};
+    }
+    return error.AgentTimeout;
 }
 
 /// Runs `incus <args...>` with inherited stdio (used for interactive shells).
@@ -75,29 +102,96 @@ pub fn runInteractive(alloc: Allocator, io: Io, args: []const []const u8) !std.p
     return try child.wait(io);
 }
 
-/// Ensures the `cage` Incus project exists.
+/// Ensures the `cage` Incus project exists and that its default profile is
+/// usable (root disk + network). New Incus projects start with an empty
+/// default profile, so Cage wires up the devices from the host's first
+/// storage pool and bridge network.
 pub fn ensureProject(alloc: Allocator, io: Io) !void {
     const res = try run(alloc, io, &.{ "project", "show", project });
     defer res.deinit(alloc);
-    if (res.term.success()) return;
-    _ = runOk(alloc, io, &.{ "project", "create", project }) catch |err| {
-        if (err == error.IncusFailed) {
-            // Created concurrently by another process; verify it now exists.
-            const check = try run(alloc, io, &.{ "project", "show", project });
-            defer check.deinit(alloc);
-            if (check.term.success()) return;
-        }
-        return err;
-    };
+
+    if (!res.term.success()) {
+        const created = runOk(alloc, io, &.{ "project", "create", project }) catch |err| switch (err) {
+            error.IncusFailed => {
+                // Created concurrently by another process; verify it now exists.
+                const check = try run(alloc, io, &.{ "project", "show", project });
+                defer check.deinit(alloc);
+                if (check.term.success()) return ensureProfileDevices(alloc, io);
+                return err;
+            },
+            else => return err,
+        };
+        alloc.free(created);
+    }
+
+    try ensureProfileDevices(alloc, io);
 }
 
-/// Lists all sandboxes in the `cage` project.
+const StoragePool = struct { name: []const u8, driver: []const u8 = "" };
+const Network = struct { name: []const u8, type: []const u8 = "" };
+
+/// Adds root and eth0 devices to the cage project's default profile if they
+/// are missing. Errors are ignored when the device already exists.
+fn ensureProfileDevices(alloc: Allocator, io: Io) !void {
+    if (try firstPoolName(alloc, io)) |pool| {
+        const pool_arg = try std.fmt.allocPrint(alloc, "pool={s}", .{pool});
+        defer alloc.free(pool_arg);
+        _ = runOkQuiet(alloc, io, &.{
+            "profile", "device", "add", "default", "root", "disk",
+            "path=/", pool_arg, "--project", project,
+        }) catch {};
+    }
+
+    if (try firstBridgeName(alloc, io)) |net| {
+        const net_arg = try std.fmt.allocPrint(alloc, "network={s}", .{net});
+        defer alloc.free(net_arg);
+        _ = runOkQuiet(alloc, io, &.{
+            "profile", "device", "add", "default", "eth0", "nic",
+            net_arg, "--project", project,
+        }) catch {};
+    }
+}
+
+fn firstPoolName(alloc: Allocator, io: Io) !?[]const u8 {
+    const stdout = try runOk(alloc, io, &.{ "storage", "list", "--format", "json" });
+    defer alloc.free(stdout);
+    const pools = try std.json.parseFromSliceLeaky([]StoragePool, alloc, stdout, .{
+        .ignore_unknown_fields = true,
+    });
+    if (pools.len == 0) return null;
+    return try alloc.dupe(u8, pools[0].name);
+}
+
+fn firstBridgeName(alloc: Allocator, io: Io) !?[]const u8 {
+    const stdout = try runOk(alloc, io, &.{ "network", "list", "--format", "json" });
+    defer alloc.free(stdout);
+    const nets = try std.json.parseFromSliceLeaky([]Network, alloc, stdout, .{
+        .ignore_unknown_fields = true,
+    });
+    for (nets) |net| {
+        if (std.mem.eql(u8, net.type, "bridge")) return try alloc.dupe(u8, net.name);
+    }
+    return null;
+}
+
+/// Lists all sandboxes in the `cage` project. Returned strings are owned by
+/// `alloc`.
 pub fn list(alloc: Allocator, io: Io) ![]Instance {
     const stdout = try runOk(alloc, io, &.{ "list", "--project", project, "--format", "json" });
     defer alloc.free(stdout);
-    return std.json.parseFromSliceLeaky([]Instance, alloc, stdout, .{
+
+    const parsed = try std.json.parseFromSliceLeaky([]Instance, alloc, stdout, .{
         .ignore_unknown_fields = true,
     });
+    const out = try alloc.alloc(Instance, parsed.len);
+    for (parsed, 0..) |inst, i| {
+        out[i] = .{
+            .name = try alloc.dupe(u8, inst.name),
+            .status = try alloc.dupe(u8, inst.status),
+            .type = try alloc.dupe(u8, inst.type),
+        };
+    }
+    return out;
 }
 
 /// Whether a sandbox with `name` exists.
@@ -156,6 +250,43 @@ pub fn exec(alloc: Allocator, io: Io, name: []const u8, argv: []const []const u8
 /// Opens an interactive shell inside the sandbox.
 pub fn shell(alloc: Allocator, io: Io, name: []const u8) !std.process.Child.Term {
     return runInteractive(alloc, io, &.{ "exec", "--project", project, name, "--", "bash", "-l" });
+}
+
+/// Runs a command inside the sandbox, feeding `input` on stdin. Stdout/stderr
+/// are inherited. Used to pass secrets (e.g. a GitHub token) without exposing
+/// them in argv or process listings.
+pub fn execInput(
+    alloc: Allocator,
+    io: Io,
+    name: []const u8,
+    argv: []const []const u8,
+    input: []const u8,
+) !std.process.Child.Term {
+    var inner: std.ArrayList([]const u8) = .empty;
+    defer inner.deinit(alloc);
+    try inner.appendSlice(alloc, &.{ "exec", "--project", project, name, "--" });
+    try inner.appendSlice(alloc, argv);
+
+    var args = try buildArgv(alloc, inner.items);
+    defer args.deinit(alloc);
+
+    var child = try std.process.spawn(io, .{
+        .argv = args.items,
+        .stdin = .pipe,
+        .stdout = .inherit,
+        .stderr = .inherit,
+    });
+
+    var buffer: [4096]u8 = undefined;
+    var writer = child.stdin.?.writerStreaming(io, &buffer);
+    try writer.interface.writeAll(input);
+    try writer.interface.flush();
+
+    // Send EOF so the child stops reading.
+    child.stdin.?.close(io);
+    child.stdin = null;
+
+    return try child.wait(io);
 }
 
 /// Copies a host file into the sandbox. `dst` is absolute inside the instance.
