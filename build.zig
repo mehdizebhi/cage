@@ -4,6 +4,11 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
+    // Embed the provisioning script at build time so the installed binary is
+    // self-contained.
+    const options = b.addOptions();
+    options.addOption([]const u8, "bootstrap_script", @embedFile("provisioning/bootstrap.sh"));
+
     const exe = b.addExecutable(.{
         .name = "cage",
         .root_module = b.createModule(.{
@@ -12,6 +17,7 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
         }),
     });
+    exe.root_module.addOptions("build_options", options);
     b.installArtifact(exe);
 
     const run_step = b.step("run", "Run cage");

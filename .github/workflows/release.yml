@@ -1,0 +1,81 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build (${{ matrix.target }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-linux
+            asset: cage-linux-x86_64
+          - target: aarch64-linux
+            asset: cage-linux-aarch64
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Zig 0.17.0
+        run: |
+          set -euo pipefail
+          ZIG_VERSION=0.17.0
+          url="https://ziglang.org/download/${ZIG_VERSION}/zig-x86_64-linux-${ZIG_VERSION}.tar.xz"
+          curl -fsSL "$url" -o /tmp/zig.tar.xz
+          sudo mkdir -p /opt/zig
+          sudo tar -xJf /tmp/zig.tar.xz -C /opt/zig --strip-components=1
+          echo "/opt/zig" >> "$GITHUB_PATH"
+
+      - name: Build
+        run: zig build -Doptimize=ReleaseSafe -Dtarget=${{ matrix.target }} --prefix dist
+
+      - name: Package
+        run: |
+          set -euo pipefail
+          mkdir -p pkg
+          cp dist/bin/cage pkg/cage
+          cp README.md pkg/README.md
+          tar -C pkg -czf "${{ matrix.asset }}.tar.gz" .
+          ls -lh "${{ matrix.asset }}.tar.gz"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset }}
+          path: ${{ matrix.asset }}.tar.gz
+          if-no-files-found: error
+
+  release:
+    name: Publish release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Generate checksums
+        run: |
+          set -euo pipefail
+          cd artifacts
+          sha256sum *.tar.gz > checksums.txt
+          cat checksums.txt
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            artifacts/*.tar.gz
+            artifacts/checksums.txt
+          generate_release_notes: true
+          fail_on_unmatched_files: true

@@ -1,0 +1,33 @@
+name: CI
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    name: Build and test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Zig 0.17.0
+        run: |
+          set -euo pipefail
+          ZIG_VERSION=0.17.0
+          url="https://ziglang.org/download/${ZIG_VERSION}/zig-x86_64-linux-${ZIG_VERSION}.tar.xz"
+          curl -fsSL "$url" -o /tmp/zig.tar.xz
+          sudo mkdir -p /opt/zig
+          sudo tar -xJf /tmp/zig.tar.xz -C /opt/zig --strip-components=1
+          echo "/opt/zig" >> "$GITHUB_PATH"
+
+      - name: Check formatting
+        run: zig fmt --check src build.zig
+
+      - name: Run tests
+        run: zig build test --summary all
+
+      - name: Build (ReleaseSafe)
+        run: zig build -Doptimize=ReleaseSafe

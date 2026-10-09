@@ -137,8 +137,8 @@ fn ensureProfileDevices(alloc: Allocator, io: Io) !void {
         const pool_arg = try std.fmt.allocPrint(alloc, "pool={s}", .{pool});
         defer alloc.free(pool_arg);
         _ = runOkQuiet(alloc, io, &.{
-            "profile", "device", "add", "default", "root", "disk",
-            "path=/", pool_arg, "--project", project,
+            "profile", "device", "add",       "default", "root", "disk",
+            "path=/",  pool_arg, "--project", project,
         }) catch {};
     }
 
@@ -146,8 +146,8 @@ fn ensureProfileDevices(alloc: Allocator, io: Io) !void {
         const net_arg = try std.fmt.allocPrint(alloc, "network={s}", .{net});
         defer alloc.free(net_arg);
         _ = runOkQuiet(alloc, io, &.{
-            "profile", "device", "add", "default", "eth0", "nic",
-            net_arg, "--project", project,
+            "profile", "device",    "add",   "default", "eth0", "nic",
+            net_arg,   "--project", project,
         }) catch {};
     }
 }
@@ -218,11 +218,10 @@ pub fn launch(
     defer alloc.free(mem_kv);
 
     _ = try runOk(alloc, io, &.{
-        "launch", image,     name,
+        "launch", image,       name,
         "--vm",   "--project", project,
-        "-c",     cpu_kv,
-        "-c",     mem_kv,
-        "-c",     "user.cage=true",
+        "-c",     cpu_kv,      "-c",
+        mem_kv,   "-c",        "user.cage=true",
     });
 }
 

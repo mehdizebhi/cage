@@ -118,38 +118,39 @@ pub fn remove(ctx: Context, name: []const u8) !void {
     try ctx.out.print("Removed '{s}'.\n", .{name});
 }
 
-/// Applies the base provisioning script inside the sandbox, if one is found.
-/// The script is located via `$CAGE_BOOTSTRAP`, then `./provisioning/bootstrap.sh`.
-fn provision(ctx: Context, name: []const u8, cfg: config.Config) !void {
-    const script = try locateBootstrap(ctx);
-    if (script == null) {
-        try ctx.err.writeAll("cage: note: no bootstrap script found, skipping provisioning\n");
-        return;
-    }
+/// The base provisioning script, embedded at build time so the installed
+/// binary works regardless of the current directory. Override with
+/// `$CAGE_BOOTSTRAP` to use a custom script.
+const build_options = @import("build_options");
+const bootstrap_script = build_options.bootstrap_script;
 
-    const remote = "/tmp/cage-bootstrap.sh";
-    try incus.pushFile(ctx.alloc, ctx.io, name, script.?, remote);
+/// Applies the base provisioning script inside the sandbox. The script is fed
+/// to `bash -s` on stdin, so nothing needs to be written to the guest disk.
+fn provision(ctx: Context, name: []const u8, cfg: config.Config) !void {
+    const script = try bootstrapScript(ctx);
 
     var args: std.ArrayList([]const u8) = .empty;
     defer args.deinit(ctx.alloc);
-    try args.appendSlice(ctx.alloc, &.{ "bash", remote });
+    try args.appendSlice(ctx.alloc, &.{ "bash", "-s", "--" });
     if (cfg.stacks.node) try args.append(ctx.alloc, "node");
     if (cfg.stacks.python) try args.append(ctx.alloc, "python");
     if (cfg.stacks.java) try args.append(ctx.alloc, "java");
     if (cfg.stacks.go) try args.append(ctx.alloc, "go");
     if (cfg.stacks.rust) try args.append(ctx.alloc, "rust");
 
-    const out = try incus.exec(ctx.alloc, ctx.io, name, args.items);
-    ctx.alloc.free(out);
+    const term = try incus.execInput(ctx.alloc, ctx.io, name, args.items, script);
+    if (!term.success()) return error.ProvisionFailed;
 }
 
-fn locateBootstrap(ctx: Context) !?[]const u8 {
+/// Returns the provisioning script: `$CAGE_BOOTSTRAP` when set, otherwise the
+/// embedded default.
+fn bootstrapScript(ctx: Context) ![]const u8 {
     if (ctx.environ.get("CAGE_BOOTSTRAP")) |p| {
-        if (p.len > 0) return try ctx.alloc.dupe(u8, p);
+        if (p.len > 0) {
+            return try std.Io.Dir.cwd().readFileAlloc(ctx.io, p, ctx.alloc, .limited(1024 * 1024));
+        }
     }
-    const default = "provisioning/bootstrap.sh";
-    std.Io.Dir.cwd().access(ctx.io, default, .{}) catch return null;
-    return default;
+    return bootstrap_script;
 }
 
 /// Configures `gh` inside the sandbox using a GitHub token. The token is fed

@@ -13,17 +13,55 @@ Early scaffold. Implemented: `create`, `list`, `shell`, `start`, `stop`,
 
 ## Requirements
 
-- Zig **0.17.0** (the code uses the new `std.Io` / `std.process.Init` APIs)
 - Incus with the QEMU driver (`incus`, `qemu-system-x86_64`, `edk2-ovmf`)
 - Membership in the `incus-admin` group
+- Zig **0.17.0** — only needed to build from source (see below)
 
-## Build
+## Install
+
+### Prebuilt binary (recommended)
 
 ```bash
+curl -fsSL https://raw.githubusercontent.com/mehdizebhi/cage/main/install.sh | sh
+```
+
+The installer detects your OS/architecture, downloads the matching release,
+verifies its checksum, and installs `cage` to `~/.local/bin`.
+
+Options:
+
+```bash
+./install.sh --version v0.1.0     # install a specific tag
+./install.sh --dir /usr/local/bin # custom install directory
+./install.sh --help
+```
+
+Environment equivalents: `CAGE_VERSION`, `CAGE_INSTALL_DIR`.
+
+Supported: Linux on `x86_64` and `aarch64`.
+
+### From source
+
+```bash
+git clone https://github.com/mehdizebhi/cage.git
+cd cage
 zig build              # produces zig-out/bin/cage
 zig build test         # run unit tests
 zig build run -- list  # run without installing
 ```
+
+## Releasing
+
+Releases are built by GitHub Actions (`.github/workflows/release.yml`). Pushing
+a `v*` tag builds Linux `x86_64` and `aarch64` binaries, generates checksums,
+and publishes a GitHub Release.
+
+```bash
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+The tag must match `cage version` output (`src/cli.zig`).
 
 ## Usage
 
@@ -67,9 +105,10 @@ Short image names are mapped for the Incus `images:` remote: `debian-13` becomes
 
 ## Provisioning
 
-On create, Cage pushes `provisioning/bootstrap.sh` into the VM and runs it. The
-script installs the base tooling (git, gh, curl, jq, ...) and OpenCode, then any
-enabled development stacks.
+On create, Cage runs `provisioning/bootstrap.sh` inside the VM. The script is
+**embedded into the binary** at build time, so it works no matter where `cage`
+is installed. It installs the base tooling (git, gh, curl, jq, ...) and OpenCode,
+then any enabled development stacks.
 
 Override the script with `CAGE_BOOTSTRAP=/path/to/script.sh`.
 
@@ -106,10 +145,12 @@ implement its own virtualization or provisioning system.
 
 ```
 build.zig            build + test steps
+install.sh           release installer
 src/main.zig         entry point, wiring
 src/cli.zig          argument parsing and dispatch
 src/commands.zig     lifecycle command implementations
 src/config.zig       config model and loader
 src/incus.zig        incus CLI wrapper
-provisioning/        in-VM bootstrap script
+provisioning/        in-VM bootstrap script (embedded at build time)
+.github/workflows/   CI + release automation
 ```
