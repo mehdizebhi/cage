@@ -1,0 +1,14 @@
+{
+  "image": "debian-13",
+  "resources": {
+    "cpu": 2,
+    "memory": "4G"
+  },
+  "stacks": {
+    "java": false,
+    "node": false,
+    "python": false,
+    "go": false,
+    "rust": false
+  }
+}
