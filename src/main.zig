@@ -40,4 +40,5 @@ test {
     _ = commands;
     _ = @import("config.zig");
     _ = @import("incus.zig");
+    _ = @import("ssh.zig");
 }

@@ -5,6 +5,7 @@ const Io = std.Io;
 const Allocator = std.mem.Allocator;
 const config = @import("config.zig");
 const incus = @import("incus.zig");
+const ssh = @import("ssh.zig");
 
 pub const Context = struct {
     alloc: Allocator,
@@ -19,6 +20,7 @@ pub const CreateOptions = struct {
     cpu: ?u32 = null,
     memory: ?[]const u8 = null,
     image: ?[]const u8 = null,
+    ssh_enabled: bool = true,
 };
 
 /// Resolves effective config: file defaults + per-sandbox overrides.
@@ -76,7 +78,22 @@ pub fn create(ctx: Context, opts: CreateOptions) !void {
         }
     }
 
-    try ctx.out.print("Sandbox '{s}' is ready. Open it with `cage shell {s}`.\n", .{ opts.name, opts.name });
+    if (opts.ssh_enabled) {
+        setupSsh(ctx, opts.name) catch |err| {
+            try ctx.err.print("cage: warning: SSH setup failed ({s})\n", .{@errorName(err)});
+        };
+    }
+
+    setupAcp(ctx, opts.name) catch |err| {
+        try ctx.err.print("cage: warning: ACP setup failed ({s})\n", .{@errorName(err)});
+    };
+
+    try ctx.out.print("Sandbox '{s}' is ready.\n", .{opts.name});
+    try ctx.out.print("  Terminal:  cage shell {s}\n", .{opts.name});
+    if (opts.ssh_enabled) {
+        try ctx.out.print("  SSH:       cage ssh {s}\n", .{opts.name});
+        try ctx.out.print("  JetBrains: cage ssh-config {s}  (add the block to ~/.ssh/config)\n", .{opts.name});
+    }
 }
 
 pub fn list(ctx: Context) !void {
@@ -182,4 +199,87 @@ fn configureGithub(ctx: Context, name: []const u8, token: []const u8) !void {
     if (!setup.success()) return error.GithubSetupFailed;
 
     try ctx.out.writeAll("Configured GitHub authentication.\n");
+}
+
+// ---------------------------------------------------------------------------
+// SSH + JetBrains integration
+// ---------------------------------------------------------------------------
+
+/// Installs the sandbox's SSH public key so key-based root login works.
+/// IntelliJ/JetBrains connect over SSH to the sandbox's bridge IP.
+fn setupSsh(ctx: Context, name: []const u8) !void {
+    const key = try ssh.ensureKeyPair(ctx.alloc, ctx.io, ctx.environ, name);
+
+    const authorized = try std.fmt.allocPrint(ctx.alloc, "{s}\n", .{key.public_key});
+    const inject = try incus.execInput(ctx.alloc, ctx.io, name, &.{
+        "bash",                                                                                                     "-c",
+        "install -d -m 700 /root/.ssh && cat > /root/.ssh/authorized_keys && chmod 600 /root/.ssh/authorized_keys",
+    }, authorized);
+    if (!inject.success()) return error.SshSetupFailed;
+
+    try ctx.out.print("Configured SSH key ({s}).\n", .{key.private_path});
+}
+
+/// Seeds `~/.jetbrains/acp.json` in the sandbox so JetBrains AI Assistant can
+/// launch OpenCode over the Agent Client Protocol, with the IntelliJ MCP server
+/// exposed so the agent gets Java/Kotlin code intelligence.
+fn setupAcp(ctx: Context, name: []const u8) !void {
+    const json = try acpJson(ctx);
+    const term = try incus.execInput(ctx.alloc, ctx.io, name, &.{
+        "bash",                                                                                                         "-c",
+        "install -d -m 700 /root/.jetbrains && cat > /root/.jetbrains/acp.json && chmod 600 /root/.jetbrains/acp.json",
+    }, json);
+    if (!term.success()) return error.AcpSetupFailed;
+
+    try ctx.out.writeAll("Seeded JetBrains ACP config (/root/.jetbrains/acp.json).\n");
+}
+
+const acp_template =
+    "{{\n" ++
+    "  \"default_mcp_settings\": {{ \"use_custom_mcp\": true, \"use_idea_mcp\": true }},\n" ++
+    "  \"agent_servers\": {{\n" ++
+    "    \"OpenCode (Sandbox)\": {{\n" ++
+    "      \"command\": \"/usr/local/bin/opencode\",\n" ++
+    "      \"args\": [\"acp\"],\n" ++
+    "      \"env\": {s}\n" ++
+    "    }}\n" ++
+    "  }}\n" ++
+    "}}\n";
+
+fn acpJson(ctx: Context) ![]const u8 {
+    if (ctx.environ.get("GEMINI_API_KEY")) |key| {
+        if (key.len > 0) {
+            const env_field = try std.fmt.allocPrint(ctx.alloc, "{{ \"GEMINI_API_KEY\": \"{s}\" }}", .{key});
+            return std.fmt.allocPrint(ctx.alloc, acp_template, .{env_field});
+        }
+    }
+    return std.fmt.allocPrint(ctx.alloc, acp_template, .{"{}"});
+}
+
+/// Opens an interactive SSH session to the sandbox.
+pub fn sshConnect(ctx: Context, name: []const u8) !void {
+    try ensureExists(ctx, name);
+    const host = (try incus.getIPv4(ctx.alloc, ctx.io, name)) orelse
+        return error.SshNotConfigured;
+    const key = try ssh.ensureKeyPair(ctx.alloc, ctx.io, ctx.environ, name);
+    const term = try ssh.connect(ctx.alloc, ctx.io, host, key.private_path);
+    if (!term.success()) return error.ShellFailed;
+}
+
+/// Prints an `~/.ssh/config` block for connecting JetBrains Remote Development
+/// to the sandbox.
+pub fn sshConfig(ctx: Context, name: []const u8) !void {
+    try ensureExists(ctx, name);
+    const host = (try incus.getIPv4(ctx.alloc, ctx.io, name)) orelse
+        return error.SshNotConfigured;
+    const key = try ssh.ensureKeyPair(ctx.alloc, ctx.io, ctx.environ, name);
+
+    const block = try ssh.configBlock(ctx.alloc, name, host, key.private_path);
+    try ctx.out.writeAll(block);
+    try ctx.out.print(
+        "\nAdd the block above to ~/.ssh/config, then in JetBrains Gateway choose\n" ++
+            "SSH and select the 'cage-{s}' host. The IDE backend and any ACP agent\n" ++
+            "run inside the sandbox.\n",
+        .{name},
+    );
 }

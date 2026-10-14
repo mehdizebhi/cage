@@ -17,8 +17,8 @@ const Io = std.Io;
 const Allocator = std.mem.Allocator;
 
 pub const default_image = "debian-13";
-pub const default_cpu: u32 = 2;
-pub const default_memory: u64 = 4 * GiB;
+pub const default_cpu: u32 = 4;
+pub const default_memory: u64 = 8 * GiB;
 const GiB: u64 = 1024 * 1024 * 1024;
 
 /// Optional development stacks. The base image stays minimal; these can be
@@ -154,7 +154,7 @@ test "parseMemory rejects garbage" {
 test "defaults" {
     const c = Config{};
     try std.testing.expectEqualStrings("debian-13", c.image);
-    try std.testing.expectEqual(@as(u32, 2), c.cpu);
+    try std.testing.expectEqual(@as(u32, 4), c.cpu);
     try std.testing.expectEqual(default_memory, c.memory_bytes);
     try std.testing.expect(!c.stacks.node);
 }
@@ -173,5 +173,5 @@ test "parse applies overrides" {
 
 test "parse empty text returns defaults" {
     const c = try parse(std.testing.allocator, "   \n");
-    try std.testing.expectEqual(@as(u32, 2), c.cpu);
+    try std.testing.expectEqual(@as(u32, 4), c.cpu);
 }

@@ -4,7 +4,7 @@ const std = @import("std");
 const Io = std.Io;
 const commands = @import("commands.zig");
 
-pub const version = "0.2.1";
+pub const version = "0.3.0";
 
 pub fn run(ctx: commands.Context, args: []const []const u8) !u8 {
     if (args.len < 2) {
@@ -24,6 +24,8 @@ pub fn run(ctx: commands.Context, args: []const []const u8) !u8 {
     if (eq(cmd, "create")) return createCmd(ctx, args[2..]);
     if (eq(cmd, "list") or eq(cmd, "ls")) return simpleCmd(ctx, commands.list);
     if (eq(cmd, "shell")) return namedCmd(ctx, args[2..], commands.shell, "shell");
+    if (eq(cmd, "ssh")) return namedCmd(ctx, args[2..], commands.sshConnect, "ssh");
+    if (eq(cmd, "ssh-config")) return namedCmd(ctx, args[2..], commands.sshConfig, "ssh-config");
     if (eq(cmd, "start")) return namedCmd(ctx, args[2..], commands.start, "start");
     if (eq(cmd, "stop")) return namedCmd(ctx, args[2..], commands.stop, "stop");
     if (eq(cmd, "remove") or eq(cmd, "rm")) return namedCmd(ctx, args[2..], commands.remove, "remove");
@@ -35,7 +37,7 @@ pub fn run(ctx: commands.Context, args: []const []const u8) !u8 {
 
 fn createCmd(ctx: commands.Context, rest: []const []const u8) !u8 {
     if (rest.len == 0) {
-        try ctx.err.writeAll("cage: usage: cage create <name> [--cpu N] [--memory SIZE] [--image IMAGE]\n");
+        try ctx.err.writeAll("cage: usage: cage create <name> [--cpu N] [--memory SIZE] [--image IMAGE] [--no-ssh]\n");
         return 2;
     }
 
@@ -56,6 +58,10 @@ fn createCmd(ctx: commands.Context, rest: []const []const u8) !u8 {
             i += 1;
             if (i >= rest.len) return usageError(ctx, "--image requires a value");
             opts.image = rest[i];
+        } else if (eq(arg, "--no-ssh")) {
+            opts.ssh_enabled = false;
+        } else if (eq(arg, "--ssh")) {
+            opts.ssh_enabled = true;
         } else {
             try ctx.err.print("cage: unknown option '{s}'\n", .{arg});
             return 2;
@@ -94,6 +100,12 @@ fn report(ctx: commands.Context, err: anyerror, name: ?[]const u8) !u8 {
         error.InvalidMemory => try ctx.err.writeAll("cage: invalid memory size (try 4G, 512M)\n"),
         error.IncusFailed => try ctx.err.writeAll("cage: incus command failed\n"),
         error.FileNotFound => try ctx.err.writeAll("cage: 'incus' executable not found in PATH\n"),
+        error.SshNotConfigured => try ctx.err.writeAll("cage: SSH is not configured or the sandbox has no IP yet\n"),
+        error.NoHome => try ctx.err.writeAll("cage: HOME is not set (needed for the SSH key)\n"),
+        error.SshKeyNotFound => try ctx.err.writeAll("cage: $CAGE_SSH_KEY is set but its .pub file was not found\n"),
+        error.SshKeygenFailed => try ctx.err.writeAll("cage: ssh-keygen failed\n"),
+        error.SshSetupFailed => try ctx.err.writeAll("cage: installing the SSH key in the sandbox failed\n"),
+        error.AcpSetupFailed => try ctx.err.writeAll("cage: seeding the JetBrains ACP config failed\n"),
         else => try ctx.err.print("cage: {s}\n", .{@errorName(err)}),
     }
     return 1;
@@ -119,6 +131,8 @@ pub fn printHelp(w: *Io.Writer) !void {
         \\  create <name>   Create a VM sandbox
         \\  list            List sandboxes
         \\  shell <name>    Open a shell in a sandbox
+        \\  ssh <name>      Open an SSH session to a sandbox
+        \\  ssh-config <name>  Print an ~/.ssh/config block for JetBrains
         \\  start <name>    Start a sandbox
         \\  stop <name>     Stop a sandbox
         \\  remove <name>   Remove a sandbox
@@ -126,9 +140,10 @@ pub fn printHelp(w: *Io.Writer) !void {
         \\  help            Print this help
         \\
         \\Create options:
-        \\  --cpu N         Number of vCPUs (default 2)
-        \\  --memory SIZE   RAM, e.g. 4G (default 4G)
+        \\  --cpu N         Number of vCPUs (default 4)
+        \\  --memory SIZE   RAM, e.g. 8G (default 8G)
         \\  --image IMAGE   Base image (default debian-13)
+        \\  --no-ssh        Do not set up SSH/JetBrains integration
         \\
     );
 }

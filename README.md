@@ -8,8 +8,9 @@ Each sandbox is a full VM in a dedicated Incus project named `cage`.
 
 ## Status
 
-Early scaffold. Implemented: `create`, `list`, `shell`, `start`, `stop`,
-`remove`, base provisioning, and GitHub authentication. See `src/` for details.
+Working. Implemented: `create`, `list`, `shell`, `ssh`, `ssh-config`, `start`,
+`stop`, `remove`, base provisioning (including OpenCode), GitHub authentication,
+and JetBrains/ACP setup. See `src/` for details.
 
 ## Requirements
 
@@ -66,19 +67,70 @@ The tag must match `cage version` output (`src/cli.zig`).
 ## Usage
 
 ```bash
-# Create a sandbox with defaults (2 vCPU, 4 GiB RAM, debian-13)
+# Create a sandbox with defaults (4 vCPU, 8 GiB RAM, debian-13)
 cage create my-agent
 
-# Custom resources
+# Custom resources / disable the SSH + JetBrains setup
 cage create my-agent --cpu 4 --memory 8G
+cage create my-agent --no-ssh
 
 # Manage
 cage list
 cage shell my-agent
+cage ssh my-agent
 cage start my-agent
 cage stop my-agent
 cage remove my-agent
 ```
+
+## JetBrains Remote Development
+
+Cage provisions each sandbox for IntelliJ: it installs `openssh-server`, adds a
+per-sandbox SSH key, and seeds `~/.jetbrains/acp.json` so JetBrains AI Assistant
+can drive OpenCode over the Agent Client Protocol — with the **integrated
+IntelliJ MCP server** enabled for Java/Kotlin code intelligence.
+
+1. **Add the SSH host.** Print a ready-to-use block and append it to
+   `~/.ssh/config`:
+
+   ```bash
+   cage ssh-config my-agent   # -> Host cage-my-agent ...
+   ```
+
+   Verify with `cage ssh my-agent`.
+
+2. **Connect JetBrains Gateway.** *Remote Development → SSH → New Connection*,
+   choose the `cage-my-agent` host, pick a project directory, and connect. The
+   headless IDE backend runs inside the VM.
+
+3. **Install ACP agents on the Host.** In the connected window:
+   *Settings → Plugins (Host)* — install **AI Assistant** (and JetBrains Air).
+   ACP agents need no JetBrains AI subscription.
+
+4. **Use OpenCode as an agent.** AI Assistant reads `~/.jetbrains/acp.json` on
+   the backend host (the VM). Cage already wrote:
+
+   ```json
+   {
+     "default_mcp_settings": { "use_custom_mcp": true, "use_idea_mcp": true },
+     "agent_servers": {
+       "OpenCode (Sandbox)": {
+         "command": "/usr/local/bin/opencode",
+         "args": ["acp"],
+         "env": {}
+       }
+     }
+   }
+   ```
+
+   Select **OpenCode (Sandbox)** in AI Chat. Authenticate the agent once by
+   running `opencode auth login` inside the sandbox (`cage ssh my-agent`).
+
+   If `GEMINI_API_KEY` is set on the host when you run `cage create`, Cage
+   injects it into the ACP config's `env` (the file lives inside the VM).
+
+> Note: JetBrains connects to the sandbox's bridge IP, which Incus assigns via
+> DHCP. If a restarted sandbox gets a new address, rerun `cage ssh-config`.
 
 ## Configuration
 
@@ -95,7 +147,7 @@ Missing file means built-in defaults. See `config.example.json`.
 ```json
 {
   "image": "debian-13",
-  "resources": { "cpu": 2, "memory": "4G" },
+  "resources": { "cpu": 4, "memory": "8G" },
   "stacks": { "java": false, "node": false, "python": false, "go": false, "rust": false }
 }
 ```
@@ -107,10 +159,23 @@ Short image names are mapped for the Incus `images:` remote: `debian-13` becomes
 
 On create, Cage runs `provisioning/bootstrap.sh` inside the VM. The script is
 **embedded into the binary** at build time, so it works no matter where `cage`
-is installed. It installs the base tooling (git, gh, curl, jq, ...) and OpenCode,
-then any enabled development stacks.
+is installed. It installs the base tooling (git, gh, curl, jq, openssh-server,
+...), OpenCode, and any enabled development stacks.
+
+OpenCode v2 is installed from the npm registry (`@opencode/cli-linux-*`), which
+is more reliable than the `opencode.ai` endpoint on restricted networks.
 
 Override the script with `CAGE_BOOTSTRAP=/path/to/script.sh`.
+
+### Environment variables
+
+| Variable | Effect |
+|---|---|
+| `GITHUB_TOKEN` | Configures `gh` inside the sandbox (via stdin) |
+| `GEMINI_API_KEY` | Injected into the sandbox's `~/.jetbrains/acp.json` |
+| `CAGE_SSH_KEY` | Reuse an existing private key instead of generating `~/.ssh/cage_<name>` |
+| `CAGE_BOOTSTRAP` | Use a custom provisioning script |
+| `CAGE_CONFIG` | Path to the config file |
 
 ## GitHub authentication
 
@@ -151,6 +216,7 @@ src/cli.zig          argument parsing and dispatch
 src/commands.zig     lifecycle command implementations
 src/config.zig       config model and loader
 src/incus.zig        incus CLI wrapper
+src/ssh.zig          SSH keys, connections, and ssh-config blocks
 provisioning/        in-VM bootstrap script (embedded at build time)
 .github/workflows/   CI + release automation
 ```

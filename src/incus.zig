@@ -237,6 +237,15 @@ pub fn list(alloc: Allocator, io: Io) ![]Instance {
     return out;
 }
 
+/// Returns the sandbox's global IPv4 address, if it has one.
+pub fn getIPv4(alloc: Allocator, io: Io, name: []const u8) !?[]const u8 {
+    const instances = try list(alloc, io);
+    for (instances) |inst| {
+        if (std.mem.eql(u8, inst.name, name)) return inst.ipv4;
+    }
+    return null;
+}
+
 /// Whether a sandbox with `name` exists.
 pub fn exists(alloc: Allocator, io: Io, name: []const u8) !bool {
     const res = try run(alloc, io, &.{ "info", "--project", project, name });
