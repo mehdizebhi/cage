@@ -266,6 +266,265 @@ pub fn sshConnect(ctx: Context, name: []const u8) !void {
     if (!term.success()) return error.ShellFailed;
 }
 
+// ---------------------------------------------------------------------------
+// Uninstall
+// ---------------------------------------------------------------------------
+
+pub const UninstallOptions = struct {
+    /// Skip the interactive confirmation prompt.
+    yes: bool = false,
+    /// Print what would be removed without changing anything.
+    dry_run: bool = false,
+    /// Keep the `cage` binary (useful when running from a source checkout).
+    keep_binary: bool = false,
+};
+
+/// Reverses an install: deletes every sandbox and the `cage` Incus project,
+/// the per-sandbox SSH keys, the managed `Host cage-*` blocks, the config
+/// directory, and finally the `cage` binary itself.
+pub fn uninstall(ctx: Context, opts: UninstallOptions) !void {
+    if (!opts.yes and !opts.dry_run) {
+        if (!try confirmUninstall(ctx, opts)) {
+            try ctx.out.writeAll("Aborted.\n");
+            return;
+        }
+    }
+
+    try removeSandboxes(ctx, opts);
+    try removeSshKeys(ctx, opts);
+    try removeSshConfig(ctx, opts);
+    try removeConfigDir(ctx, opts);
+    if (!opts.keep_binary) try removeBinary(ctx, opts);
+
+    if (opts.dry_run) {
+        try ctx.out.writeAll("\nDry run: nothing was changed.\n");
+    } else {
+        try ctx.out.writeAll("\nUninstalled cage.\n");
+    }
+}
+
+/// Prints a summary and reads a yes/no answer from stdin.
+fn confirmUninstall(ctx: Context, opts: UninstallOptions) !bool {
+    try ctx.out.writeAll(
+        "This will permanently:\n" ++
+            "  - delete all sandboxes in the Incus project 'cage', then the project\n" ++
+            "  - remove ~/.ssh/cage_* keys\n" ++
+            "  - remove 'Host cage-*' blocks from ~/.ssh/config\n" ++
+            "  - remove the cage config directory\n",
+    );
+    if (!opts.keep_binary) try ctx.out.writeAll("  - delete the cage binary\n");
+    try ctx.out.writeAll("\nContinue? [y/N] ");
+    try ctx.out.flush();
+
+    var buffer: [256]u8 = undefined;
+    var reader = std.Io.File.stdin().readerStreaming(ctx.io, &buffer);
+    const line = reader.interface.takeDelimiterInclusive('\n') catch "";
+    const answer = std.mem.trim(u8, line, " \t\r\n");
+    return std.ascii.eqlIgnoreCase(answer, "y") or std.ascii.eqlIgnoreCase(answer, "yes");
+}
+
+/// Deletes every sandbox in the `cage` project, then the project itself.
+fn removeSandboxes(ctx: Context, opts: UninstallOptions) !void {
+    const present = incus.projectExists(ctx.alloc, ctx.io) catch false;
+    if (!present) {
+        try ctx.out.writeAll("No Incus project 'cage' to remove.\n");
+        return;
+    }
+
+    if (incus.list(ctx.alloc, ctx.io)) |instances| {
+        for (instances) |inst| {
+            if (opts.dry_run) {
+                try ctx.out.print("Would remove sandbox '{s}'.\n", .{inst.name});
+                continue;
+            }
+            incus.remove(ctx.alloc, ctx.io, inst.name) catch |err| {
+                try ctx.err.print("cage: warning: could not delete '{s}' ({s})\n", .{ inst.name, @errorName(err) });
+                continue;
+            };
+            try ctx.out.print("Removed sandbox '{s}'.\n", .{inst.name});
+        }
+    } else |err| {
+        try ctx.err.print("cage: warning: could not list sandboxes ({s})\n", .{@errorName(err)});
+    }
+
+    if (opts.dry_run) {
+        try ctx.out.writeAll("Would remove the Incus project 'cage'.\n");
+        return;
+    }
+    incus.deleteProject(ctx.alloc, ctx.io) catch |err| {
+        try ctx.err.print("cage: warning: could not delete the 'cage' project ({s})\n", .{@errorName(err)});
+        return;
+    };
+    try ctx.out.writeAll("Removed the Incus project 'cage'.\n");
+}
+
+/// Deletes the per-sandbox host keys `~/.ssh/cage_*`.
+fn removeSshKeys(ctx: Context, opts: UninstallOptions) !void {
+    const home = homeDir(ctx) orelse return;
+    const ssh_dir = try std.fs.path.join(ctx.alloc, &.{ home, ".ssh" });
+
+    var dir = std.Io.Dir.cwd().openDir(ctx.io, ssh_dir, .{ .iterate = true }) catch return;
+    defer dir.close(ctx.io);
+
+    var keys: std.ArrayList([]const u8) = .empty;
+    var it = dir.iterate();
+    while (it.next(ctx.io) catch null) |entry| {
+        if (std.mem.startsWith(u8, entry.name, "cage_")) {
+            try keys.append(ctx.alloc, try std.fs.path.join(ctx.alloc, &.{ ssh_dir, entry.name }));
+        }
+    }
+
+    for (keys.items) |path| {
+        if (opts.dry_run) {
+            try ctx.out.print("Would remove SSH key {s}.\n", .{path});
+            continue;
+        }
+        std.Io.Dir.cwd().deleteFile(ctx.io, path) catch |err| {
+            try ctx.err.print("cage: warning: could not remove {s} ({s})\n", .{ path, @errorName(err) });
+            continue;
+        };
+        try ctx.out.print("Removed SSH key {s}.\n", .{path});
+    }
+}
+
+/// Strips the managed `Host cage-*` blocks from `~/.ssh/config`.
+fn removeSshConfig(ctx: Context, opts: UninstallOptions) !void {
+    const home = homeDir(ctx) orelse return;
+    const cfg_path = try std.fs.path.join(ctx.alloc, &.{ home, ".ssh", "config" });
+
+    const text = std.Io.Dir.cwd().readFileAlloc(ctx.io, cfg_path, ctx.alloc, .limited(1024 * 1024)) catch return;
+    const cleaned = try stripCageBlocks(ctx.alloc, text);
+    if (std.mem.eql(u8, cleaned, text)) return;
+
+    if (opts.dry_run) {
+        try ctx.out.print("Would remove 'Host cage-*' blocks from {s}.\n", .{cfg_path});
+        return;
+    }
+    try std.Io.Dir.cwd().writeFile(ctx.io, .{ .sub_path = cfg_path, .data = cleaned });
+    try ctx.out.print("Removed 'Host cage-*' blocks from {s}.\n", .{cfg_path});
+}
+
+/// Removes the cage config directory (`$XDG_CONFIG_HOME/cage` or `~/.config/cage`).
+fn removeConfigDir(ctx: Context, opts: UninstallOptions) !void {
+    var path: ?[]const u8 = null;
+    if (ctx.environ.get("XDG_CONFIG_HOME")) |xdg| {
+        if (xdg.len > 0) path = try std.fs.path.join(ctx.alloc, &.{ xdg, "cage" });
+    } else if (homeDir(ctx)) |home| {
+        path = try std.fs.path.join(ctx.alloc, &.{ home, ".config", "cage" });
+    }
+    const dir_path = path orelse return;
+
+    std.Io.Dir.cwd().access(ctx.io, dir_path, .{}) catch return;
+
+    if (opts.dry_run) {
+        try ctx.out.print("Would remove {s}.\n", .{dir_path});
+        return;
+    }
+    std.Io.Dir.cwd().deleteTree(ctx.io, dir_path) catch |err| {
+        try ctx.err.print("cage: warning: could not remove {s} ({s})\n", .{ dir_path, @errorName(err) });
+        return;
+    };
+    try ctx.out.print("Removed {s}.\n", .{dir_path});
+}
+
+/// Deletes the running binary. On Linux the inode stays alive until exit.
+fn removeBinary(ctx: Context, opts: UninstallOptions) !void {
+    const exe = std.process.executablePathAlloc(ctx.io, ctx.alloc) catch return;
+
+    if (opts.dry_run) {
+        try ctx.out.print("Would remove the cage binary ({s}).\n", .{exe});
+        return;
+    }
+    std.Io.Dir.deleteFileAbsolute(ctx.io, exe) catch |err| {
+        try ctx.err.print("cage: warning: could not remove {s} ({s})\n", .{ exe, @errorName(err) });
+        return;
+    };
+    try ctx.out.print("Removed the cage binary ({s}).\n", .{exe});
+}
+
+fn homeDir(ctx: Context) ?[]const u8 {
+    const home = ctx.environ.get("HOME") orelse return null;
+    return if (home.len > 0) home else null;
+}
+
+/// Returns a copy of `text` without any `Host cage-*` block.
+fn stripCageBlocks(alloc: Allocator, text: []const u8) ![]const u8 {
+    var out: std.ArrayList(u8) = .empty;
+    var skipping = false;
+    var i: usize = 0;
+    while (i < text.len) {
+        const newline = std.mem.indexOfScalarPos(u8, text, i, '\n');
+        const end = newline orelse text.len;
+        const line = text[i..end];
+
+        if (isHostCageLine(line)) {
+            skipping = true;
+        } else if (skipping and isBlockBodyLine(line)) {
+            // Still inside the managed block; drop the line.
+        } else {
+            skipping = false;
+            try out.appendSlice(alloc, line);
+            if (newline != null) try out.append(alloc, '\n');
+        }
+
+        i = end + 1;
+    }
+    return out.toOwnedSlice(alloc);
+}
+
+/// Whether `line` is an indented/blank continuation of a preceding block.
+fn isBlockBodyLine(line: []const u8) bool {
+    return line.len == 0 or line[0] == ' ' or line[0] == '\t';
+}
+
+/// Whether `line` is a top-level `Host cage-*` declaration.
+fn isHostCageLine(line: []const u8) bool {
+    if (line.len <= 4 or line[0] == ' ' or line[0] == '\t') return false;
+    if (!std.mem.startsWith(u8, line, "Host")) return false;
+
+    const rest = line[4..];
+    if (rest[0] != ' ' and rest[0] != '\t') return false;
+
+    const pattern = std.mem.trim(u8, rest, " \t");
+    return std.mem.startsWith(u8, pattern, "cage-");
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+test "stripCageBlocks removes managed host blocks" {
+    const a = std.testing.allocator;
+    const input =
+        "Host example\n" ++
+        "    HostName example.com\n" ++
+        "\n" ++
+        "Host cage-agent\n" ++
+        "    HostName 10.0.0.1\n" ++
+        "    User root\n" ++
+        "    IdentityFile /home/u/.ssh/cage_agent\n" ++
+        "    IdentitiesOnly yes\n" ++
+        "    StrictHostKeyChecking accept-new\n" ++
+        "\n" ++
+        "Host other\n" ++
+        "    HostName other.com\n";
+    const cleaned = try stripCageBlocks(a, input);
+    defer a.free(cleaned);
+
+    try std.testing.expect(std.mem.indexOf(u8, cleaned, "cage-agent") == null);
+    try std.testing.expect(std.mem.indexOf(u8, cleaned, "Host example") != null);
+    try std.testing.expect(std.mem.indexOf(u8, cleaned, "Host other") != null);
+    try std.testing.expect(std.mem.indexOf(u8, cleaned, "HostName other.com") != null);
+}
+
+test "stripCageBlocks leaves unrelated config untouched" {
+    const a = std.testing.allocator;
+    const input = "Host a\n    HostName a\nHost b\n    HostName b\n";
+    const cleaned = try stripCageBlocks(a, input);
+    defer a.free(cleaned);
+    try std.testing.expectEqualStrings(input, cleaned);
+}
+
 /// Prints an `~/.ssh/config` block for connecting JetBrains Remote Development
 /// to the sandbox.
 pub fn sshConfig(ctx: Context, name: []const u8) !void {

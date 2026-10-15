@@ -9,8 +9,8 @@ Each sandbox is a full VM in a dedicated Incus project named `cage`.
 ## Status
 
 Working. Implemented: `create`, `list`, `shell`, `ssh`, `ssh-config`, `start`,
-`stop`, `remove`, base provisioning (including OpenCode), GitHub authentication,
-and JetBrains/ACP setup. See `src/` for details.
+`stop`, `remove`, `uninstall`, base provisioning (including OpenCode), GitHub
+authentication, and JetBrains/ACP setup. See `src/` for details.
 
 ## Requirements
 
@@ -82,6 +82,23 @@ cage start my-agent
 cage stop my-agent
 cage remove my-agent
 ```
+
+## Uninstall
+
+`cage uninstall` reverses the installation. It deletes every sandbox in the
+`cage` project and the project itself, the `~/.ssh/cage_*` keys, the managed
+`Host cage-*` blocks in `~/.ssh/config`, the cage config directory, and finally
+the `cage` binary.
+
+```bash
+cage uninstall          # asks for confirmation first
+cage uninstall --yes    # no prompt
+cage uninstall --dry-run        # print what would be removed
+cage uninstall --keep-binary    # leave the cage binary in place
+```
+
+It does not touch Incus itself, your storage pools, or the default bridge
+network.
 
 ## JetBrains Remote Development
 

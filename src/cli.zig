@@ -4,7 +4,7 @@ const std = @import("std");
 const Io = std.Io;
 const commands = @import("commands.zig");
 
-pub const version = "0.3.0";
+pub const version = "0.4.0";
 
 pub fn run(ctx: commands.Context, args: []const []const u8) !u8 {
     if (args.len < 2) {
@@ -29,6 +29,7 @@ pub fn run(ctx: commands.Context, args: []const []const u8) !u8 {
     if (eq(cmd, "start")) return namedCmd(ctx, args[2..], commands.start, "start");
     if (eq(cmd, "stop")) return namedCmd(ctx, args[2..], commands.stop, "stop");
     if (eq(cmd, "remove") or eq(cmd, "rm")) return namedCmd(ctx, args[2..], commands.remove, "remove");
+    if (eq(cmd, "uninstall")) return uninstallCmd(ctx, args[2..]);
 
     try ctx.err.print("cage: unknown command '{s}'\n\n", .{cmd});
     try printHelp(ctx.err);
@@ -69,6 +70,25 @@ fn createCmd(ctx: commands.Context, rest: []const []const u8) !u8 {
     }
 
     commands.create(ctx, opts) catch |err| return report(ctx, err, opts.name);
+    return 0;
+}
+
+fn uninstallCmd(ctx: commands.Context, rest: []const []const u8) !u8 {
+    var opts = commands.UninstallOptions{};
+    for (rest) |arg| {
+        if (eq(arg, "-y") or eq(arg, "--yes")) {
+            opts.yes = true;
+        } else if (eq(arg, "--dry-run")) {
+            opts.dry_run = true;
+        } else if (eq(arg, "--keep-binary")) {
+            opts.keep_binary = true;
+        } else {
+            try ctx.err.print("cage: unknown option '{s}'\n", .{arg});
+            return 2;
+        }
+    }
+
+    commands.uninstall(ctx, opts) catch |err| return report(ctx, err, null);
     return 0;
 }
 
@@ -136,6 +156,7 @@ pub fn printHelp(w: *Io.Writer) !void {
         \\  start <name>    Start a sandbox
         \\  stop <name>     Stop a sandbox
         \\  remove <name>   Remove a sandbox
+        \\  uninstall       Remove cage and everything it installed
         \\  version         Print version
         \\  help            Print this help
         \\
@@ -144,6 +165,11 @@ pub fn printHelp(w: *Io.Writer) !void {
         \\  --memory SIZE   RAM, e.g. 8G (default 8G)
         \\  --image IMAGE   Base image (default debian-13)
         \\  --no-ssh        Do not set up SSH/JetBrains integration
+        \\
+        \\Uninstall options:
+        \\  -y, --yes       Skip the confirmation prompt
+        \\  --dry-run       Show what would be removed
+        \\  --keep-binary   Keep the cage binary itself
         \\
     );
 }

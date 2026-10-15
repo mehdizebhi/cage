@@ -169,6 +169,19 @@ pub fn ensureProject(alloc: Allocator, io: Io) !void {
     try ensureProfileDevices(alloc, io);
 }
 
+/// Whether the dedicated `cage` Incus project exists.
+pub fn projectExists(alloc: Allocator, io: Io) !bool {
+    const res = try run(alloc, io, &.{ "project", "show", project });
+    defer res.deinit(alloc);
+    return res.term.success();
+}
+
+/// Deletes the dedicated `cage` Incus project. The project must be empty
+/// (delete every sandbox first).
+pub fn deleteProject(alloc: Allocator, io: Io) !void {
+    _ = try runOk(alloc, io, &.{ "project", "delete", project });
+}
+
 const StoragePool = struct { name: []const u8, driver: []const u8 = "" };
 const Network = struct { name: []const u8, type: []const u8 = "" };
 
